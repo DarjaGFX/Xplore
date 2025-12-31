@@ -108,12 +108,13 @@ fn render_main(f: &mut Frame, app: &mut App) {
     if let Some(entry) = app.filtered_entries.get(app.selected_index) {
         let desc = entry.description.as_deref().unwrap_or("No description");
         let details_text = format!(
-            "Name: {}\nPath: {}\nSize: {} ({})\nModified: {}\n\n--- Metadata ---\nPermissions: {}\nOwner: {}\nGroup: {}\n\n--- Description ---\n{}",
+            "Name: {}\nPath: {}\nSize: {} ({})\nModified: {}\n\n--- Metadata ---\nInode: {}\nPermissions: {}\nOwner: {}\nGroup: {}\n\n--- Description ---\n{}",
             entry.name,
             entry.path.display(),
             entry.human_size(),
             format!("{} bytes", entry.size),
             entry.mod_time.format("%Y-%m-%d %H:%M:%S"),
+            entry.inode,
             entry.permissions,
             entry.owner,
             entry.group,
@@ -240,14 +241,61 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 fn render_prompt(f: &mut Frame, app: &mut App) {
     if let InputMode::Prompt(prompt_type) = &app.input_mode {
         let area = centered_rect(60, 20, f.area());
-        let title = match prompt_type {
-            crate::ui::app::PromptType::NewFolder => " New Folder Name ",
-            crate::ui::app::PromptType::DeleteConfirmation => " Delete Selected? (y/n) ",
-        };
-        let block = Paragraph::new(app.prompt_buffer.as_str())
-            .block(Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(Color::Yellow)));
         f.render_widget(ratatui::widgets::Clear, area);
-        f.render_widget(block, area);
+
+        match prompt_type {
+            crate::ui::app::PromptType::NewFolder => {
+                let block = Paragraph::new(app.prompt_buffer.as_str())
+                    .block(Block::default().borders(Borders::ALL).title(" New Folder Name ").border_style(Style::default().fg(Color::Yellow)));
+                f.render_widget(block, area);
+            }
+            crate::ui::app::PromptType::DeleteConfirmation => {
+                let block = Block::default().borders(Borders::ALL).title(" Delete Confirmation ").border_style(Style::default().fg(Color::Red));
+                let inner = area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 });
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1), // Question
+                        Constraint::Min(0),    // Padding
+                        Constraint::Length(3), // Buttons
+                    ])
+                    .split(inner);
+
+                let question = Paragraph::new("Are you sure you want to delete?")
+                    .alignment(ratatui::layout::Alignment::Center);
+
+                let buttons_layout = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Percentage(50),
+                        Constraint::Percentage(50),
+                    ])
+                    .split(chunks[2]);
+
+                let ok_style = if app.prompt_index == 0 {
+                    Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Red)
+                };
+                let ok_btn = Paragraph::new("OK")
+                    .alignment(ratatui::layout::Alignment::Center)
+                    .block(Block::default().borders(Borders::ALL).border_style(ok_style));
+
+                let cancel_style = if app.prompt_index == 1 {
+                    Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let cancel_btn = Paragraph::new("Cancel")
+                    .alignment(ratatui::layout::Alignment::Center)
+                    .block(Block::default().borders(Borders::ALL).border_style(cancel_style));
+
+                f.render_widget(block, area);
+                f.render_widget(question, chunks[0]);
+                f.render_widget(ok_btn, buttons_layout[0]);
+                f.render_widget(cancel_btn, buttons_layout[1]);
+            }
+        }
     }
 }
 

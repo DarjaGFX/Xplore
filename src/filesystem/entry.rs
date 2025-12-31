@@ -12,6 +12,7 @@ pub struct FileEntry {
     pub permissions: String,
     pub owner: String,
     pub group: String,
+    pub inode: u64,
 }
 
 impl FileEntry {

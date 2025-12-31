@@ -52,6 +52,7 @@ pub struct App {
     pub prompt_buffer: String,
     pub list_state: ListState,
     pub list_height: u16,
+    pub prompt_index: usize, // For button selection in modals
 }
 
 impl App {
@@ -75,6 +76,7 @@ impl App {
             prompt_buffer: String::new(),
             list_state: ListState::default(),
             list_height: 0,
+            prompt_index: 0,
         };
         app.refresh();
         app
@@ -202,7 +204,10 @@ impl App {
                     self.prompt_buffer.clear();
                     self.input_mode = InputMode::Prompt(PromptType::NewFolder);
                 } else if event_str == self.config.keybindings.delete {
-                    self.input_mode = InputMode::Prompt(PromptType::DeleteConfirmation);
+                    if !self.selected_paths.is_empty() || self.filtered_entries.get(self.selected_index).is_some() {
+                        self.input_mode = InputMode::Prompt(PromptType::DeleteConfirmation);
+                        self.prompt_index = 1; // Default to Cancel for safety
+                    }
                 } else if event_str == self.config.keybindings.help {
                     self.input_mode = InputMode::Help;
                 } else if event_str == self.config.keybindings.quit {
@@ -214,34 +219,47 @@ impl App {
                 }
                 self.list_state.select(Some(self.selected_index));
             },
-            InputMode::Prompt(prompt_type) => match code {
-                KeyCode::Enter => {
-                    match prompt_type {
-                        PromptType::NewFolder => {
-                            let path = self.manager.current_path().join(&self.prompt_buffer);
-                            let _ = self.manager.create_dir(&path);
-                        }
-                        PromptType::DeleteConfirmation => {
-                            if self.prompt_buffer.to_lowercase() == "y" {
-                                self.delete_selected();
+            InputMode::Prompt(prompt_type) => match prompt_type {
+                PromptType::NewFolder => match code {
+                    KeyCode::Enter => {
+                        let name = self.prompt_buffer.clone();
+                        if !name.is_empty() {
+                            let path = self.manager.current_path().join(name);
+                            if let Err(e) = self.manager.create_dir(&path) {
+                                self.error_message = Some(e.to_string());
+                            } else {
+                                self.refresh();
                             }
                         }
+                        self.input_mode = InputMode::Normal;
+                        self.prompt_buffer.clear();
                     }
-                    self.input_mode = InputMode::Normal;
-                    self.prompt_buffer.clear();
-                    self.refresh();
-                }
-                KeyCode::Esc => {
-                    self.input_mode = InputMode::Normal;
-                    self.prompt_buffer.clear();
-                }
-                KeyCode::Char(c) => {
-                    self.prompt_buffer.push(c);
-                }
-                KeyCode::Backspace => {
-                    self.prompt_buffer.pop();
-                }
-                _ => {}
+                    KeyCode::Esc => {
+                        self.input_mode = InputMode::Normal;
+                        self.prompt_buffer.clear();
+                    }
+                    KeyCode::Char(c) => self.prompt_buffer.push(c),
+                    KeyCode::Backspace => {
+                        self.prompt_buffer.pop();
+                    }
+                    _ => {}
+                },
+                PromptType::DeleteConfirmation => match code {
+                    KeyCode::Enter => {
+                        if self.prompt_index == 0 {
+                            // OK selected
+                            self.delete_selected();
+                        }
+                        self.input_mode = InputMode::Normal;
+                    }
+                    KeyCode::Esc => {
+                        self.input_mode = InputMode::Normal;
+                    }
+                    KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                        self.prompt_index = 1 - self.prompt_index;
+                    }
+                    _ => {}
+                },
             },
             InputMode::Help => {
                 if code == KeyCode::Esc || code == KeyCode::F(1) || event_str == self.config.keybindings.help {

@@ -27,7 +27,7 @@ impl FileSystemManager {
 
         // Add "." entry
         let meta_dot = fs::metadata(&self.current_dir)?;
-        let (perm_dot, owner_dot, group_dot) = self.get_metadata_info(&meta_dot);
+        let (perm_dot, owner_dot, group_dot, inode_dot) = self.get_metadata_info(&meta_dot);
         entries.push(FileEntry {
             name: ".".to_string(),
             path: self.current_dir.clone(),
@@ -38,12 +38,13 @@ impl FileSystemManager {
             permissions: perm_dot,
             owner: owner_dot,
             group: group_dot,
+            inode: inode_dot,
         });
 
         // Add ".." entry if not at root
         if let Some(parent) = self.current_dir.parent() {
             let meta_parent = fs::metadata(parent)?;
-            let (perm_p, owner_p, group_p) = self.get_metadata_info(&meta_parent);
+            let (perm_p, owner_p, group_p, inode_p) = self.get_metadata_info(&meta_parent);
             entries.push(FileEntry {
                 name: "..".to_string(),
                 path: parent.to_path_buf(),
@@ -54,6 +55,7 @@ impl FileSystemManager {
                 permissions: perm_p,
                 owner: owner_p,
                 group: group_p,
+                inode: inode_p,
             });
         }
 
@@ -67,7 +69,7 @@ impl FileSystemManager {
             let name = entry.file_name().to_string_lossy().to_string();
             
             let description = metadata::get_description(&path);
-            let (permissions, owner, group) = self.get_metadata_info(&metadata);
+            let (permissions, owner, group, inode) = self.get_metadata_info(&metadata);
 
             entries.push(FileEntry {
                 name,
@@ -79,6 +81,7 @@ impl FileSystemManager {
                 permissions,
                 owner,
                 group,
+                inode,
             });
         }
         
@@ -200,7 +203,7 @@ impl FileSystemManager {
 
                 if matches {
                     let metadata = entry.metadata().ok()?;
-                    let (permissions, owner, group) = self.get_metadata_info(&metadata);
+                    let (permissions, owner, group, inode) = self.get_metadata_info(&metadata);
                     Some(FileEntry {
                         name,
                         path: path.to_path_buf(),
@@ -211,6 +214,7 @@ impl FileSystemManager {
                         permissions,
                         owner,
                         group,
+                        inode,
                     })
                 } else {
                     None
@@ -220,10 +224,11 @@ impl FileSystemManager {
             .collect()
     }
 
-    fn get_metadata_info(&self, metadata: &fs::Metadata) -> (String, String, String) {
+    fn get_metadata_info(&self, metadata: &fs::Metadata) -> (String, String, String, u64) {
         #[cfg(unix)]
         {
             let mode = metadata.permissions().mode();
+            let inode = metadata.ino();
             let permissions = format!(
                 "{}{}{}{}{}{}{}{}{}{}",
                 if metadata.is_dir() { "d" } else { "-" },
@@ -240,11 +245,11 @@ impl FileSystemManager {
             
             let owner = metadata.uid().to_string();
             let group = metadata.gid().to_string();
-            (permissions, owner, group)
+            (permissions, owner, group, inode)
         }
         #[cfg(not(unix))]
         {
-            ("-".to_string(), "unknown".to_string(), "unknown".to_string())
+            ("-".to_string(), "unknown".to_string(), "unknown".to_string(), 0)
         }
     }
 }
