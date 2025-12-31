@@ -20,11 +20,11 @@ cargo install xplore-cli
 ```
 
 ### 📦 Pre-built Binaries
-Download the latest binary for your operating system from the [Releases](https://github.com/user/Xplore/releases) page. Move the `xplore` binary to your system's PATH (e.g., `/usr/local/bin`).
+Download the latest binary for your operating system from the [Releases](https://github.com/DarjaGFX/Xplore/releases) page. Move the `xplore` binary to your system's PATH (e.g., `/usr/local/bin`).
 
 ### 🛠️ From Source
 ```bash
-git clone https://github.com/user/Xplore.git
+git clone https://github.com/DarjaGFX/Xplore.git
 cd Xplore
 cargo install --path .
 ```
