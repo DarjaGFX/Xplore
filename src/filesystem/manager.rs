@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Local};
 use crate::filesystem::FileEntry;
 use crate::metadata;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 pub struct FileSystemManager {
     current_dir: PathBuf,
@@ -24,25 +26,34 @@ impl FileSystemManager {
         let mut entries = Vec::new();
 
         // Add "." entry
+        let meta_dot = fs::metadata(&self.current_dir)?;
+        let (perm_dot, owner_dot, group_dot) = self.get_metadata_info(&meta_dot);
         entries.push(FileEntry {
             name: ".".to_string(),
             path: self.current_dir.clone(),
             size: 0,
             is_dir: true,
-            mod_time: fs::metadata(&self.current_dir)?.modified()?.into(),
+            mod_time: meta_dot.modified()?.into(),
             description: None,
+            permissions: perm_dot,
+            owner: owner_dot,
+            group: group_dot,
         });
 
         // Add ".." entry if not at root
         if let Some(parent) = self.current_dir.parent() {
-            let metadata = fs::metadata(parent)?;
+            let meta_parent = fs::metadata(parent)?;
+            let (perm_p, owner_p, group_p) = self.get_metadata_info(&meta_parent);
             entries.push(FileEntry {
                 name: "..".to_string(),
                 path: parent.to_path_buf(),
                 size: 0,
                 is_dir: true,
-                mod_time: metadata.modified()?.into(),
+                mod_time: meta_parent.modified()?.into(),
                 description: None,
+                permissions: perm_p,
+                owner: owner_p,
+                group: group_p,
             });
         }
 
@@ -56,6 +67,7 @@ impl FileSystemManager {
             let name = entry.file_name().to_string_lossy().to_string();
             
             let description = metadata::get_description(&path);
+            let (permissions, owner, group) = self.get_metadata_info(&metadata);
 
             entries.push(FileEntry {
                 name,
@@ -64,6 +76,9 @@ impl FileSystemManager {
                 is_dir,
                 mod_time,
                 description,
+                permissions,
+                owner,
+                group,
             });
         }
         
@@ -123,21 +138,49 @@ impl FileSystemManager {
         // 2. Attempt standard rename
         if fs::rename(src, dst).is_err() {
             // 3. Fallback: Copy and Delete (Cross-device move)
-            fs::copy(src, dst)?;
+            self.copy_recursive(src, dst)?;
             
             // Re-apply xattrs to destination
             for (attr, val) in attr_data {
-                xattr::set(dst, attr, &val)?;
+                let _ = xattr::set(dst, attr, &val);
             }
             
-            fs::remove_file(src)?;
+            self.delete_recursive(src)?;
         } else {
             // Rename might have stripped xattrs depending on the OS/FS, 
             // but usually it preserves them if within the same FS.
-            // To be safe, we can try to re-apply if they are missing,
-            // but rename is usually atomic and preserves metadata.
+            // To be safe, we can try to re-apply if they are missing.
+            for (attr, val) in attr_data {
+                let _ = xattr::set(dst, attr, &val);
+            }
         }
 
+        Ok(())
+    }
+
+    pub fn create_dir(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(path)
+    }
+
+    pub fn delete_recursive(&self, path: &Path) -> std::io::Result<()> {
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        }
+    }
+
+    pub fn copy_recursive(&self, src: &Path, dst: &Path) -> std::io::Result<()> {
+        if src.is_dir() {
+            std::fs::create_dir_all(dst)?;
+            for entry in std::fs::read_dir(src)? {
+                let entry = entry?;
+                let file_name = entry.file_name();
+                self.copy_recursive(&src.join(&file_name), &dst.join(&file_name))?;
+            }
+        } else {
+            std::fs::copy(src, dst)?;
+        }
         Ok(())
     }
 
@@ -157,6 +200,7 @@ impl FileSystemManager {
 
                 if matches {
                     let metadata = entry.metadata().ok()?;
+                    let (permissions, owner, group) = self.get_metadata_info(&metadata);
                     Some(FileEntry {
                         name,
                         path: path.to_path_buf(),
@@ -164,6 +208,9 @@ impl FileSystemManager {
                         is_dir: metadata.is_dir(),
                         mod_time: metadata.modified().ok()?.into(),
                         description,
+                        permissions,
+                        owner,
+                        group,
                     })
                 } else {
                     None
@@ -171,5 +218,33 @@ impl FileSystemManager {
             })
             .take(1000) // Limit results for performance
             .collect()
+    }
+
+    fn get_metadata_info(&self, metadata: &fs::Metadata) -> (String, String, String) {
+        #[cfg(unix)]
+        {
+            let mode = metadata.permissions().mode();
+            let permissions = format!(
+                "{}{}{}{}{}{}{}{}{}{}",
+                if metadata.is_dir() { "d" } else { "-" },
+                if mode & 0o400 != 0 { "r" } else { "-" },
+                if mode & 0o200 != 0 { "w" } else { "-" },
+                if mode & 0o100 != 0 { "x" } else { "-" },
+                if mode & 0o040 != 0 { "r" } else { "-" },
+                if mode & 0o020 != 0 { "w" } else { "-" },
+                if mode & 0o010 != 0 { "x" } else { "-" },
+                if mode & 0o004 != 0 { "r" } else { "-" },
+                if mode & 0o002 != 0 { "w" } else { "-" },
+                if mode & 0o001 != 0 { "x" } else { "-" },
+            );
+            
+            let owner = metadata.uid().to_string();
+            let group = metadata.gid().to_string();
+            (permissions, owner, group)
+        }
+        #[cfg(not(unix))]
+        {
+            ("-".to_string(), "unknown".to_string(), "unknown".to_string())
+        }
     }
 }

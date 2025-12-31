@@ -45,7 +45,7 @@ async fn run_app<B: ratatui::backend::Backend>(
 ) -> Result<(), Box<dyn std::error::Error>> 
 where <B as Backend>::Error: 'static
 {
-    let mut app = App::new(".");
+    let mut app = App::new();
 
     loop {
         terminal.draw(|f| ui::ui::render(f, &mut app))?;
