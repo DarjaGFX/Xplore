@@ -1,6 +1,6 @@
 [package]
 name = "xplore-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A high-performance, full-screen CLI file manager and metadata tagger using extended attributes (xattrs)."
 license = "MIT"
