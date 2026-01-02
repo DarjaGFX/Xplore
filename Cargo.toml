@@ -10,15 +10,18 @@ categories = ["command-line-utilities", "filesystem"]
 readme = "README.md"
 
 [dependencies]
+ansi-to-tui = "8.0.0"
 chrono = "0.4.42"
 clap = { version = "4.5.53", features = ["derive"] }
 crossterm = "0.29.0"
 dirs = "6.0.0"
 opener = "0.8.3"
+portable-pty = "0.9.0"
 ratatui = "0.30.0"
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.48.0", features = ["full"] }
 toml = "0.9.10"
+vt100 = "0.16.2"
 walkdir = "2.5.0"
 xattr = "1.6.1"
 

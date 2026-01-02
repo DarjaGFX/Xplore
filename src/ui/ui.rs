@@ -64,13 +64,30 @@ fn render_main(f: &mut Frame, app: &mut App) {
     f.render_widget(search_bar, header_chunks[1]);
 
     // Main area (Split horizontally: List | Details)
+    // If terminal is open, further split vertically
+    let main_area = if app.is_terminal_open {
+        let vert_split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(60),
+                Constraint::Percentage(40),
+            ])
+            .split(chunks[1]);
+        
+        // Render terminal pane at the bottom
+        render_terminal(f, app, vert_split[1]);
+        vert_split[0]
+    } else {
+        chunks[1]
+    };
+
     let main_ranks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(50),
             Constraint::Percentage(50),
         ])
-        .split(chunks[1]);
+        .split(main_area);
 
     // File List
     let items: Vec<ListItem> = app.filtered_entries.iter().map(|e| {
@@ -145,12 +162,11 @@ fn render_main(f: &mut Frame, app: &mut App) {
         InputMode::Prompt(_) => " [Chars] Input | [Enter] OK | [Esc] Cancel ".to_string(),
         _ => {
             format!(
-                " {} | {} | {} | {} | {} | {} | {} ",
+                " {} | {} | {} | {} | {} | {} ",
                 app.config.get_hint("help"),
-                app.config.get_hint("select"),
+                app.config.get_hint("toggle_terminal"),
                 app.config.get_hint("new_folder"),
                 app.config.get_hint("page_up"),
-                app.config.get_hint("page_down"),
                 app.config.get_hint("search"),
                 app.config.get_hint("settings")
             )
@@ -318,4 +334,81 @@ fn render_help(f: &mut Frame, app: &mut App) {
         .wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(block, area);
+}
+
+fn render_terminal(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1)].as_ref())
+        .split(area);
+
+    let title = if app.terminal_focused {
+        let cwd = app.manager.current_path().display().to_string();
+        format!(" Terminal (focused) [{}] ", cwd)
+    } else {
+        format!(" Terminal [{} to focus] ", app.config.keybindings.terminal_prefix)
+    };
+
+    let border_style = if app.terminal_focused {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(border_style);
+        
+    let inner_area = block.inner(chunks[0]);
+    f.render_widget(block, chunks[0]);
+
+    // Render VT100 screen only if PTY exists
+    if let Some(parser) = &app.pty_parser {
+        let screen = parser.screen();
+        let hide_cursor = screen.hide_cursor();
+        let (cy, cx) = screen.cursor_position();
+
+        // Iterate over the visible area of the terminal
+        for y in 0..inner_area.height {
+            for x in 0..inner_area.width {
+                if let Some(cell) = screen.cell(y, x) {
+                     let ch = cell.contents();
+                     if ch.trim().is_empty() && cell.bgcolor() == vt100::Color::Default {
+                         continue;
+                     }
+
+                     let fg = map_color(cell.fgcolor());
+                     let bg = map_color(cell.bgcolor());
+                     
+                     let mut style = Style::default().fg(fg).bg(bg);
+                     if cell.bold() { style = style.add_modifier(Modifier::BOLD); }
+                     if cell.italic() { style = style.add_modifier(Modifier::ITALIC); }
+                     if cell.underline() { style = style.add_modifier(Modifier::UNDERLINED); }
+                     if cell.inverse() { style = style.add_modifier(Modifier::REVERSED); }
+                     
+                     f.render_widget(Paragraph::new(ch).style(style), Rect::new(inner_area.x + x, inner_area.y + y, 1, 1));
+                }
+            }
+        }
+
+        // Render cursor
+        if app.terminal_focused && !hide_cursor {
+             // Check bounds
+             if cy < inner_area.height && cx < inner_area.width {
+                 f.set_cursor_position((inner_area.x + cx, inner_area.y + cy));
+             }
+        }
+    } else {
+        let text = " Terminal Closed (Ctrl+T to open) ";
+        f.render_widget(Paragraph::new(text).alignment(ratatui::layout::Alignment::Center), inner_area);
+    }
+}
+
+fn map_color(c: vt100::Color) -> Color {
+    match c {
+        vt100::Color::Default => Color::Reset,
+        vt100::Color::Idx(i) => Color::Indexed(i),
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
 }

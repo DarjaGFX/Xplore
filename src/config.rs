@@ -32,6 +32,8 @@ pub struct Keybindings {
     pub page_down: String,
     pub select_all: String,
     pub deselect_all: String,
+    pub toggle_terminal: String,
+    pub terminal_prefix: String,
 }
 
 impl Default for Config {
@@ -61,6 +63,8 @@ impl Default for Config {
                 page_down: "pagedown".to_string(),
                 select_all: "ctrl+a".to_string(),
                 deselect_all: "ctrl+d".to_string(),
+                toggle_terminal: "ctrl+t".to_string(),
+                terminal_prefix: "ctrl+b".to_string(),
             },
         }
     }
@@ -134,6 +138,8 @@ impl Config {
             "page_down" => self.keybindings.page_down = key,
             "select_all" => self.keybindings.select_all = key,
             "deselect_all" => self.keybindings.deselect_all = key,
+            "toggle_terminal" => self.keybindings.toggle_terminal = key,
+            "terminal_prefix" => self.keybindings.terminal_prefix = key,
             _ => return Err("Invalid action"),
         }
         Ok(())
@@ -168,6 +174,9 @@ impl Config {
             ("edit", self.keybindings.edit.clone()),
             // Search
             ("search", self.keybindings.search.clone()),
+            // Terminal
+            ("toggle_terminal", self.keybindings.toggle_terminal.clone()),
+            ("terminal_prefix", self.keybindings.terminal_prefix.clone()),
         ]
     }
 
@@ -201,6 +210,10 @@ impl Config {
                 ("delete", self.keybindings.delete.clone()),
                 ("edit", self.keybindings.edit.clone()),
             ]),
+            ("Terminal", vec![
+                ("toggle_terminal", self.keybindings.toggle_terminal.clone()),
+                ("terminal_prefix", self.keybindings.terminal_prefix.clone()),
+            ]),
             ("Search", vec![
                 ("search", self.keybindings.search.clone()),
             ]),
@@ -232,6 +245,7 @@ impl Config {
             "page_down" => format!("[{}] Page Down", self.keybindings.page_down),
             "select_all" => format!("[{}] Select All", self.keybindings.select_all),
             "deselect_all" => format!("[{}] Deselect All", self.keybindings.deselect_all),
+            "toggle_terminal" => format!("[{}] Terminal", self.keybindings.toggle_terminal),
             _ => String::new(),
         }
     }

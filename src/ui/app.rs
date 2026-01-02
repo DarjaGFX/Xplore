@@ -33,7 +33,12 @@ pub enum InputMode {
     Help,
 }
 
+
 use ratatui::widgets::ListState;
+use portable_pty::{CommandBuilder, NativePtySystem, PtyPair, PtySize, PtySystem};
+use std::sync::mpsc::{channel, Receiver};
+use std::io::{Read, Write};
+use std::thread;
 
 pub struct App {
     pub manager: FileSystemManager,
@@ -52,13 +57,95 @@ pub struct App {
     pub prompt_buffer: String,
     pub list_state: ListState,
     pub list_height: u16,
-    pub prompt_index: usize, // For button selection in modals
+    pub prompt_index: usize,
+    // Terminal state (PTY)
+    pub is_terminal_open: bool,
+    pub terminal_focused: bool,
+    pub pty_pair: Option<PtyPair>,
+    pub pty_parser: Option<vt100::Parser>,
+    pub pty_writer: Option<Box<dyn Write + Send>>,
+    pub pty_reader_rx: Option<Receiver<Vec<u8>>>,
+    pub shell_id: u32,
+    pub last_synced_path: PathBuf,
+    pub tick_count: u64,
+}
+
+fn find_shell_pid(parent_pid: u32) -> Option<u32> {
+    use std::collections::{HashSet, VecDeque};
+    
+    // 1. Snapshot all processes: PID -> (PPID, Name)
+    let Ok(entries) = std::fs::read_dir("/proc") else { return None };
+    let mut process_map = std::collections::HashMap::new();
+    
+    for entry in entries.flatten() {
+        let Ok(filename) = entry.file_name().into_string() else { continue };
+        let Ok(pid) = filename.parse::<u32>() else { continue };
+        
+        let path = entry.path();
+        // Read stat for PPID
+        if let Ok(stat) = std::fs::read_to_string(path.join("stat")) {
+            if let Some(r_paren) = stat.rfind(')') {
+                let rest = &stat[r_paren+2..];
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                if parts.len() > 1 {
+                    if let Ok(ppid) = parts[1].parse::<u32>() {
+                        // Read comm for Name
+                        let name = if let Ok(comm) = std::fs::read_to_string(path.join("comm")) {
+                            comm.trim().to_string()
+                        } else {
+                            String::new()
+                        };
+                        process_map.insert(pid, (ppid, name));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Build Adjacency List (PPID -> Children)
+    let mut children_map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    for (pid, (ppid, _)) in &process_map {
+        children_map.entry(*ppid).or_default().push(*pid);
+    }
+
+    // 3. BFS from parent_pid
+    let mut queue = VecDeque::new();
+    queue.push_back(parent_pid);
+    let mut visited = HashSet::new();
+    visited.insert(parent_pid);
+
+    while let Some(current_pid) = queue.pop_front() {
+        if let Some(children) = children_map.get(&current_pid) {
+            for child_pid in children {
+                if !visited.contains(child_pid) {
+                    visited.insert(*child_pid);
+                    
+                    // Check if this child is a shell
+                    if let Some((_, name)) = process_map.get(child_pid) {
+                        let n = name.to_lowercase();
+                        if n.ends_with("sh") || n == "fish" || n == "nu" {
+                            // Found a shell!
+                            return Some(*child_pid);
+                        }
+                    }
+                    
+                    // Add to queue to search grandchildren
+                    queue.push_back(*child_pid);
+                }
+            }
+        }
+    }
+    
+    None
 }
 
 impl App {
     pub fn new() -> Self {
         let manager = FileSystemManager::new(".");
         let config = Config::load();
+        
+        let current_path = manager.current_path().to_path_buf();
+
         let mut app = Self {
             manager,
             all_entries: Vec::new(),
@@ -77,9 +164,60 @@ impl App {
             list_state: ListState::default(),
             list_height: 0,
             prompt_index: 0,
+            // Terminal state
+            is_terminal_open: false, 
+            terminal_focused: false,
+            pty_pair: None,
+            pty_parser: None,
+            pty_writer: None,
+            pty_reader_rx: None,
+            shell_id: 0, 
+            last_synced_path: current_path,
+            tick_count: 0,
         };
         app.refresh();
         app
+    }
+
+    pub fn spawn_pty(&mut self) {
+        let pty_system = NativePtySystem::default();
+        let pair = pty_system.openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        }).expect("Failed to create PTY");
+        
+        let shell = std::env::var("SHELL").unwrap_or("sh".to_string());
+        let mut cmd = CommandBuilder::new(&shell);
+        cmd.cwd(self.manager.current_path());
+        
+        let _child = pair.slave.spawn_command(cmd).expect("Failed to spawn shell");
+        
+        let mut reader = pair.master.try_clone_reader().expect("Failed to clone pty reader");
+        let writer = pair.master.take_writer().expect("Failed to take pty writer");
+        
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let mut buffer = [0u8; 1024];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(n) if n > 0 => {
+                        let _ = tx.send(buffer[..n].to_vec());
+                    }
+                    Ok(_) => break, // EOF
+                    Err(_) => break, // Error
+                }
+            }
+        });
+        
+        let parser = vt100::Parser::new(24, 80, 0);
+        
+        self.pty_pair = Some(pair);
+        self.pty_parser = Some(parser);
+        self.pty_writer = Some(writer);
+        self.pty_reader_rx = Some(rx);
+        self.shell_id = 0; // Reset shell ID to force re-discovery
     }
 
     pub fn is_selected(&self, path: &PathBuf) -> bool {
@@ -113,11 +251,146 @@ impl App {
         self.list_state.select(Some(self.selected_index));
     }
 
+    pub fn tick(&mut self) {
+        self.tick_count += 1;
+
+        // Read from PTY
+        if let Some(rx) = &self.pty_reader_rx {
+             while let Ok(bytes) = rx.try_recv() {
+                 if let Some(parser) = &mut self.pty_parser {
+                     parser.process(&bytes);
+                 }
+             }
+        }
+        
+        // 1. Live View Poll (Every ~1s, assuming 100ms tick -> 10 ticks)
+        if self.tick_count % 10 == 0 {
+             self.refresh(); // Reload files
+        }
+
+        // 2. Sync Files -> Terminal
+        // If manager path changed since last check (and it wasn't us syncing it), update PTY.
+        let current = self.manager.current_path().to_path_buf();
+        if current != self.last_synced_path {
+             // User navigated in GUI
+             // We need to escape the path properly. For now, simple quote.
+             let path_str = current.to_string_lossy();
+             // Write "cd '<path>'\r"
+             if let Some(writer) = &mut self.pty_writer {
+                 let cmd = format!("cd '{}'\r", path_str);
+                 let _ = writer.write_all(cmd.as_bytes());
+                 let _ = writer.flush();
+             }
+             
+             self.last_synced_path = current.clone();
+        }
+        
+        // 3. Sync Terminal -> Files (Linux only)
+        if self.shell_id == 0 {
+             if self.tick_count % 5 == 0 {
+                 if let Some(pid) = find_shell_pid(std::process::id()) {
+                      self.shell_id = pid;
+                 }
+             }
+        }
+        
+        if self.shell_id > 0 && self.tick_count % 5 == 0 {
+             match std::fs::read_link(format!("/proc/{}/cwd", self.shell_id)) {
+                  Ok(target) => {
+                      if target != current {
+                           if let Ok(_) = self.manager.navigate_to(target.clone()) {
+                                self.last_synced_path = target;
+                                self.refresh();
+                           }
+                      }
+                  },
+                  Err(_) => {
+                      self.shell_id = 0;
+                  }
+             }
+        }
+    }
+
     pub fn on_key(&mut self, code: KeyCode, modifiers: crossterm::event::KeyModifiers) {
         let event_str = crate::config::key_event_to_string(code, modifiers);
 
         match &self.input_mode {
             InputMode::Normal => {
+                if event_str == self.config.keybindings.toggle_terminal {
+                    self.is_terminal_open = !self.is_terminal_open;
+                    if self.is_terminal_open {
+                        self.terminal_focused = true;
+                        if self.pty_pair.is_none() {
+                             self.spawn_pty();
+                        }
+                    } else {
+                        self.terminal_focused = false;
+                    }
+                    return;
+                }
+                if event_str == self.config.keybindings.terminal_prefix {
+                    if self.is_terminal_open {
+                        self.terminal_focused = !self.terminal_focused;
+                    }
+                    return;
+                }
+
+                if self.terminal_focused {
+                    // Check for Ctrl+D (EOF/Close)
+                    if modifiers == crossterm::event::KeyModifiers::CONTROL && code == KeyCode::Char('d') {
+                        // Close terminal pane and kill PTY
+                        self.is_terminal_open = false;
+                        self.terminal_focused = false;
+                        self.pty_pair = None; // Dropping closes the PTY
+                        self.pty_parser = None;
+                        self.pty_writer = None;
+                        self.pty_reader_rx = None;
+                        self.shell_id = 0;
+                        return;
+                    }
+                
+                    // Forward input to PTY
+                    if let Some(writer) = &mut self.pty_writer {
+                        let input_bytes = match code {
+                            KeyCode::Char(c) => {
+                                if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                                    let byte = match c {
+                                        'a'..='z' => c as u8 - b'a' + 1,
+                                        '[' => 27, // Esc
+                                        ' ' => 0, // Null
+                                        _ => c as u8, // Fallback
+                                    };
+                                    vec![byte]
+                                } else {
+                                    let mut b = [0; 4];
+                                    c.encode_utf8(&mut b).as_bytes().to_vec()
+                                }
+                            }
+                            KeyCode::Enter => vec![b'\r'],
+                            KeyCode::Backspace => vec![b'\x7f'], 
+                            KeyCode::Tab => vec![b'\t'],
+                            KeyCode::Esc => vec![b'\x1b'],
+                            KeyCode::Up => vec![b'\x1b', b'[', b'A'],
+                            KeyCode::Down => vec![b'\x1b', b'[', b'B'],
+                            KeyCode::Right => vec![b'\x1b', b'[', b'C'],
+                            KeyCode::Left => vec![b'\x1b', b'[', b'D'],
+                            KeyCode::PageUp => vec![b'\x1b', b'[', b'5', b'~'],
+                            KeyCode::PageDown => vec![b'\x1b', b'[', b'6', b'~'],
+                            KeyCode::Delete => vec![b'\x1b', b'[', b'3', b'~'],
+                            KeyCode::Home => vec![b'\x1b', b'[', b'H'],
+                            KeyCode::End => vec![b'\x1b', b'[', b'F'],
+                            _ => vec![],
+                        };
+                        
+                        if !input_bytes.is_empty() {
+                             let _ = writer.write_all(&input_bytes);
+                             let _ = writer.flush();
+                        }
+                    }
+                    return;
+                }
+
+                // Normal file manager keybindings (only when terminal is NOT focused)
                 if event_str == self.config.keybindings.up || code == KeyCode::Up {
                     if self.selected_index > 0 {
                         self.selected_index -= 1;
@@ -132,19 +405,18 @@ impl App {
                             let path = entry.path.clone();
                             if self.manager.navigate_to(path).is_ok() {
                                 self.clear_selection_if_needed();
-                                self.search_query.clear(); // Clear search on navigate
+                                self.search_query.clear();
                                 self.refresh();
                                 self.selected_index = 0;
                             }
                         } else {
-                            // Try to open file
                             let _ = opener::open(&entry.path);
                         }
                     }
                 } else if event_str == self.config.keybindings.backspace || code == KeyCode::Backspace {
                     if self.manager.navigate_up() {
                         self.clear_selection_if_needed();
-                        self.search_query.clear(); // Clear search on navigate
+                        self.search_query.clear();
                         self.refresh();
                         self.selected_index = 0;
                     }
@@ -206,7 +478,7 @@ impl App {
                 } else if event_str == self.config.keybindings.delete {
                     if !self.selected_paths.is_empty() || self.filtered_entries.get(self.selected_index).is_some() {
                         self.input_mode = InputMode::Prompt(PromptType::DeleteConfirmation);
-                        self.prompt_index = 1; // Default to Cancel for safety
+                        self.prompt_index = 1;
                     }
                 } else if event_str == self.config.keybindings.help {
                     self.input_mode = InputMode::Help;
@@ -435,4 +707,5 @@ impl App {
             self.selected_paths.clear();
         }
     }
+
 }

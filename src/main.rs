@@ -49,8 +49,11 @@ where <B as Backend>::Error: 'static
 
     loop {
         terminal.draw(|f| ui::ui::render(f, &mut app))?;
+        
+        // Tick input from PTY
+        app.tick();
 
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(10))? {
             if let Event::Key(key) = event::read()? {
                 let code_str = match key.code {
                     KeyCode::Char(c) => c.to_string(),
